@@ -1,0 +1,232 @@
+{
+  "name": "Radar de Vagas com IA",
+  "nodes": [
+    {
+      "id": "n1",
+      "name": "Gmail - alertas de vagas",
+      "type": "n8n-nodes-base.gmailTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "pollTimes": {
+          "item": [
+            {
+              "mode": "everyHour"
+            }
+          ]
+        },
+        "simple": false,
+        "filters": {
+          "q": "from:(linkedin.com OR gupy.io OR indeed.com OR vagas.com.br) newer_than:1d"
+        }
+      }
+    },
+    {
+      "id": "n2",
+      "name": "Preparar texto",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        0
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const SYSTEM = \"Você é um assistente de busca de emprego. Vai receber o texto de um e-mail de alerta de vagas (LinkedIn, Gupy, Indeed, Vagas.com etc.). O e-mail pode conter várias vagas.\\n\\nPERFIL DO CANDIDATO\\n- Formação: Ciência da Computação.\\n- Interesse principal: desenvolvimento de software e dados. Aceita outras áreas, com nota menor.\\n- Nível: estágio ou júnior. Vagas pleno/sênior devem receber nota baixa.\\n- Mora em Rio das Ostras (RJ).\\n- Modelo: remoto, híbrido ou presencial.\\n  - Presencial/híbrido perto de Rio das Ostras (Macaé, Casimiro de Abreu, Cabo Frio, Búzios, Rio das Ostras): ótimo.\\n  - Presencial/híbrido mais longe, dentro do RJ: só vale se a vaga citar ajuda de custo, vale-transporte ou auxílio-deslocamento; senão, nota baixa.\\n  - Vaga fora do estado do RJ: SOMENTE se for 100% remota. Caso contrário, nota 0.\\n- Salário: não quer salário muito baixo. Se o salário não for informado, não penalize muito; mencione \\\"não informado\\\".\\n\\nTAREFA\\nExtraia TODAS as vagas do e-mail e avalie cada uma de 0 a 10 conforme o perfil. Seja crítico e honesto. Se alguma regra eliminatória for violada, nota entre 0 e 2.\\n\\nResponda APENAS com JSON válido, neste formato:\\n{\\\"vagas\\\":[{\\\"titulo\\\":\\\"\\\",\\\"empresa\\\":\\\"\\\",\\\"local\\\":\\\"\\\",\\\"modelo\\\":\\\"remoto|hibrido|presencial|nao informado\\\",\\\"salario\\\":\\\"\\\",\\\"link\\\":\\\"\\\",\\\"nota\\\":0,\\\"motivo\\\":\\\"1 ou 2 frases justificando a nota\\\"}]}\\n\\nSe o e-mail não tiver vagas, responda {\\\"vagas\\\":[]}. Nunca invente links; se não houver, deixe vazio.\";\n\nreturn $input.all().map(i => {\n  const j = i.json;\n  let texto = j.text || '';\n  if (!texto && j.html) {\n    texto = j.html\n      .replace(/<style[\\s\\S]*?<\\/style>/gi, '')\n      .replace(/<a [^>]*href=\"([^\"]+)\"[^>]*>([\\s\\S]*?)<\\/a>/gi, '$2 ($1)')\n      .replace(/<[^>]+>/g, ' ')\n      .replace(/\\s+/g, ' ');\n  }\n  if (!texto) texto = j.snippet || '';\n  texto = texto.slice(0, 12000);\n\n  const body = {\n    model: 'gemini-4-hydrogen',\n    temperature: 0.2,\n    response_format: { type: 'json_object' },\n    messages: [\n      { role: 'system', content: SYSTEM },\n      { role: 'user', content: 'Assunto: ' + (j.subject || '') + '\\n\\nCorpo do e-mail:\\n' + texto }\n    ]\n  };\n  return { json: { body, remetente: (j.from && j.from.text) || '' } };\n});"
+      }
+    },
+    {
+      "id": "n3",
+      "name": "IA - avaliar vagas",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        480,
+        0
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.body) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "n4",
+      "name": "Separar vagas",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        720,
+        0
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const metas = $('Preparar texto').all();\nconst out = [];\nconst hoje = new Date().toISOString().slice(0, 10);\n\n$input.all().forEach((it, idx) => {\n  let vagas = [];\n  try {\n    const content = it.json.choices[0].message.content;\n    vagas = JSON.parse(content).vagas || [];\n  } catch (e) {\n    return; // resposta inválida: ignora este e-mail\n  }\n  const origem = (metas[idx] && metas[idx].json.remetente) || '';\n  vagas.forEach(v => {\n    out.push({ json: {\n      data: hoje,\n      titulo: v.titulo || '',\n      empresa: v.empresa || '',\n      local: v.local || '',\n      modelo: v.modelo || '',\n      salario: v.salario || 'não informado',\n      nota: Number(v.nota) || 0,\n      motivo: v.motivo || '',\n      link: v.link || '',\n      origem,\n      status: 'Nova'\n    }});\n  });\n});\nreturn out;"
+      }
+    },
+    {
+      "id": "n5",
+      "name": "Nota >= 7?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        960,
+        0
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ $json.nota }}",
+              "rightValue": 7,
+              "operator": {
+                "type": "number",
+                "operation": "gte"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "n6",
+      "name": "Google Sheets - registrar",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        1200,
+        -80
+      ],
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "COLE_AQUI_O_ID_DA_PLANILHA"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "Vagas"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Data": "={{ $json.data }}",
+            "Titulo": "={{ $json.titulo }}",
+            "Empresa": "={{ $json.empresa }}",
+            "Local": "={{ $json.local }}",
+            "Modelo": "={{ $json.modelo }}",
+            "Salario": "={{ $json.salario }}",
+            "Nota": "={{ $json.nota }}",
+            "Motivo": "={{ $json.motivo }}",
+            "Link": "={{ $json.link }}",
+            "Status": "={{ $json.status }}"
+          },
+          "matchingColumns": [],
+          "schema": []
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "n7",
+      "name": "Telegram - avisar",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1200,
+        100
+      ],
+      "parameters": {
+        "chatId": "COLE_AQUI_SEU_CHAT_ID",
+        "text": "={{ '🎯 Nota ' + $json.nota + '/10 - ' + $json.titulo + ' @ ' + $json.empresa + '\\n📍 ' + $json.local + ' (' + $json.modelo + ')\\n💰 ' + $json.salario + '\\n💡 ' + $json.motivo + '\\n🔗 ' + $json.link }}",
+        "additionalFields": {
+          "appendAttribution": false
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Gmail - alertas de vagas": {
+      "main": [
+        [
+          {
+            "node": "Preparar texto",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Preparar texto": {
+      "main": [
+        [
+          {
+            "node": "IA - avaliar vagas",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IA - avaliar vagas": {
+      "main": [
+        [
+          {
+            "node": "Separar vagas",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Separar vagas": {
+      "main": [
+        [
+          {
+            "node": "Nota >= 7?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Nota >= 7?": {
+      "main": [
+        [
+          {
+            "node": "Google Sheets - registrar",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Telegram - avisar",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}
